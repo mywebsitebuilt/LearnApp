@@ -1,44 +1,54 @@
+// backend/server.js
 const express = require("express");
 const mongoose = require("mongoose");
+const http = require("http");
+const socketIo = require("socket.io");
+const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const cors = require("cors");
 
 const app = express();
-app.use(express.json());
+const server = http.createServer(app);
+const io = socketIo(server, { cors: { origin: "*" } });
+
 app.use(cors());
+app.use(express.json());
 
 mongoose.connect(
-  'mongodb+srv://sfayazmr:Abcdef067@cluster01.ibbs2.mongodb.net/LangUsers?retryWrites=true&w=majority&appName=Cluster01',
-  { useNewUrlParser: true, useUnifiedTopology: true }
+  "mongodb+srv://sfayazmr:Abcdef067@cluster01.ibbs2.mongodb.net/chatDB?retryWrites=true&w=majority",
+  {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  }
 )
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((error) => console.error('Error connecting to MongoDB:', error));
+  .then(() => console.log("MongoDB connected successfully!"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
 // User Schema
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  learningLevel: { type: String, default: "beginner" },
-  translationHistory: { type: Array, default: [] },
-  quizResults: { type: Array, default: [] },
-  timestamps: { type: Array, default: [] },
-  loginStreak: { type: Number, default: 1 },
-  lastLoginDate: { type: String, default: new Date().toISOString().split("T")[0] },
+  username: String,
+  password: String,
 });
-
 const User = mongoose.model("User", userSchema);
 
-// Register User
+// Message Schema
+const messageSchema = new mongoose.Schema({
+  sender: String,
+  receiver: String,
+  messageText: { type: String, default: "" },
+  timestamp: { type: Date, default: Date.now },
+  file: {
+    name: { type: String },
+    type: { type: String },
+    data: { type: Buffer }, // Ensure data is stored as Buffer
+  },
+});
+const Message = mongoose.model("Message", messageSchema);
+
+// User Registration
 app.post("/api/register", async (req, res) => {
   try {
     const { username, password } = req.body;
-    console.log("Received password during registration:", password);
-
-    const existingUser = await User.findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
-    }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = new User({ username, password: hashedPassword });
@@ -46,131 +56,114 @@ app.post("/api/register", async (req, res) => {
 
     res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ message: "An error occurred during registration" });
+    res.status(500).json({ message: error.message });
   }
 });
 
-// Login User & Track Login Streak
+// User Login
 app.post("/api/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-    console.log("Received password during login:", password);
-
     const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
-
-    //Log the stored Hashed password.
-    console.log("Stored Hashed password:", user.password);
+    if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
-
-    const today = new Date().toISOString().split("T")[0];
-
-    // Update login streak
-    let newStreak = user.loginStreak;
-    if (user.lastLoginDate !== today) {
-      const lastLogin = new Date(user.lastLoginDate);
-      const todayDate = new Date(today);
-      const diffDays = (todayDate - lastLogin) / (1000 * 60 * 60 * 24);
-
-      if (diffDays === 1) {
-        newStreak += 1;
-      } else {
-        newStreak = 1;
-      }
-
-      await User.findByIdAndUpdate(user._id, { loginStreak: newStreak, lastLoginDate: today });
-    }
+    if (!isValid) return res.status(400).json({ message: "Invalid credentials" });
 
     const token = jwt.sign({ username }, "secretKey", { expiresIn: "1h" });
-    res.json({ token, username, loginStreak: newStreak });
+    res.json({ token, username });
   } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ message: "An error occurred during login" });
+    res.status(500).json({ message: error.message });
   }
 });
-// Update User Data (Translation, Quiz, Level)
-app.put("/api/updateUser", async (req, res) => {
+
+// Fetch Messages
+app.get("/api/messages", async (req, res) => {
   try {
-    const { username, learningLevel, translationHistory = [], quizResults = [] } = req.body;
-
-    if (!username) {
-      return res.status(400).json({ message: "Username is required" });
-    }
-
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Update learningLevel if provided
-    if (learningLevel) {
-      user.learningLevel = learningLevel;
-    }
-
-    // Append translation history if provided
-    if (Array.isArray(translationHistory) && translationHistory.length > 0) {
-      user.translationHistory.push(...translationHistory);
-    }
-
-    // Append quiz results if provided
-    if (Array.isArray(quizResults) && quizResults.length > 0) {
-      user.quizResults.push(...quizResults);
-    }
-
-    // Add a timestamp for the update
-    user.timestamps.push(new Date().toISOString());
-
-    // Save the updated user data
-    await user.save();
-
-    // Send a success response with the updated user data
-    res.json({ message: "User data updated successfully", updatedUser: user });
-
+    const messages = await Message.find().sort({ timestamp: 1 });
+    res.json(messages);
   } catch (error) {
-    // Handle errors during the update process
-    console.error("Update user error:", error);
-    res.status(500).json({
-      message: "An error occurred while updating user data",
-      error: error.message,
-    });
+    res.status(500).json({ message: error.message });
   }
 });
 
-
-
-app.get("/api/user", async (req, res) => {
+// Fetch User List
+app.get("/api/users", async (req, res) => {
   try {
-    console.log("Received API request:", req.query); // Check if username is coming
-
-    const username = req.query.username;
-    if (!username) {
-      console.log("No username provided in query.");
-      return res.status(400).json({ message: "Username is required." });
-    }
-
-    console.log(`Searching for user: ${username}`);
-    const user = await User.findOne({ username });
-
-    if (!user) {
-      console.log(`User not found: ${username}`);
-      return res.status(404).json({ message: `User '${username}' not found.` });
-    }
-
-    res.json(user);
+    const users = await User.find().select("username");
+    res.json(users);
   } catch (error) {
-    console.error("Error fetching user:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    res.status(500).json({ message: error.message });
   }
 });
 
+// Socket.io for Real-time Chat
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  socket.on("sendMessage", async ({ sender, receiver, messageText, file }) => {
+    try {
+      let newMessageData = { sender, receiver, timestamp: Date.now() };
+  
+      if (file) {
+        newMessageData.file = {
+          name: file.name,
+          type: file.type,
+          data: Buffer.from(file.data, "base64"), // Convert base64 to Buffer
+        };
+      } else {
+        newMessageData.messageText = messageText;
+      }
+  
+      const newMessage = new Message(newMessageData);
+      await newMessage.save();
+  
+      io.emit("newMessage", newMessage);
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
+  });
+  
+  socket.on("typing", ({ user, isTyping }) => {
+    io.emit("typing", { user, isTyping });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
+});
+
+// Edit Message
+app.put("/api/messages/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { messageText } = req.body;
+
+    const message = await Message.findByIdAndUpdate(
+      id,
+      { messageText },
+      { new: true }
+    );
+    if (!message) return res.status(404).json({ message: "Message not found" });
+
+    res.json({ message: "Message updated successfully", updatedMessage: message });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete Message
+app.delete("/api/messages/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const message = await Message.findByIdAndDelete(id);
+    if (!message) return res.status(404).json({ message: "Message not found" });
+
+    res.json({ message: "Message deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
 
 // Start Server
-const port = process.env.PORT || 5000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+server.listen(5000, () => console.log("Server running on port 5000"));
